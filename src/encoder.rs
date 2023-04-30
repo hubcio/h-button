@@ -23,7 +23,7 @@ where
         mut pin_driver_a: PinDriver<'static, A, Input>,
         mut pin_driver_b: PinDriver<'static, B, Input>,
         debounce_duration: Duration,
-        on_change_callback: Arc<impl Fn(i32) + 'static>,
+        // on_change_callback: Arc<impl Fn(i32) + 'static>,
     ) -> Self {
         pin_driver_a.set_pull(Pull::Up).unwrap();
         pin_driver_a
@@ -65,7 +65,6 @@ where
             .unwrap();
         // let on_change_callback = on_change_callback;
 
-        let on_change_callback_a = on_change_callback.clone();
         let callback_enc_gpio_a = {
             let enc = encoder.clone();
             let pos = position.clone();
@@ -84,12 +83,11 @@ where
                     }
                     Direction::None => {}
                 }
-                on_change_callback_a(pos.load(atomic::Ordering::SeqCst));
                 timer_a.after(debounce_duration).unwrap();
             }
         };
 
-        let on_change_callback_b = on_change_callback;
+        // let on_change_callback_b = on_change_callback;
         let callback_enc_gpio_b = {
             let enc = encoder.clone();
             let pos = position.clone();
@@ -108,7 +106,7 @@ where
                     }
                     Direction::None => {}
                 }
-                on_change_callback_b(pos.load(atomic::Ordering::SeqCst));
+                // on_change_callback_b(pos.load(atomic::Ordering::SeqCst));
                 timer_b.after(debounce_duration).unwrap();
             }
         };

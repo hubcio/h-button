@@ -10,8 +10,8 @@ use std::{
 };
 
 pub struct LedButton<O: OutputPin, I: InputPin> {
-    led: Arc<Mutex<PinDriver<'static, O, Output>>>,
-    button: Arc<Mutex<PinDriver<'static, I, Input>>>,
+    _led: Arc<Mutex<PinDriver<'static, O, Output>>>,
+    _button: Arc<Mutex<PinDriver<'static, I, Input>>>,
     led_state: Arc<AtomicBool>,
 }
 
@@ -78,8 +78,8 @@ where
         }
 
         Self {
-            led,
-            button,
+            _led: led,
+            _button: button,
             led_state,
         }
     }

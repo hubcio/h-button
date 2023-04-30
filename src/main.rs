@@ -1,9 +1,6 @@
-use std::ffi::c_void;
-use std::ptr;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+// use std::ffi::c_void;
+// use std::ptr;
+use std::{ffi::c_void, time::Duration};
 
 use esp_idf_hal::delay::FreeRtos;
 #[allow(unused_imports)]
@@ -14,24 +11,23 @@ use esp_idf_sys::{
 };
 
 // This `static mut` holds the queue handle we are going to get from `xQueueGenericCreate`.
-// This is unsafe, but we are careful not to enable our GPIO interrupt handler until after this value has been initialised, and then never modify it again
+// This is unsafe, but we are careful not to enable our GPIO interrupt handler until after this value has been initialized, and then never modify it again
 static mut EVENT_QUEUE: Option<QueueHandle_t> = None;
 
 unsafe extern "C" fn notify_interrupt(_: *mut c_void) {
     xQueueGiveFromISR(EVENT_QUEUE.unwrap(), std::ptr::null_mut());
 }
 
-use esp32_nimble::{uuid128, BLEDevice, NimbleProperties};
-
-// use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::*;
-use esp_idf_svc::timer::EspTimerService;
+// use esp_idf_svc::timer::EspTimerService;
 
 use esp_idf_hal::peripherals::Peripherals;
 
+mod ble_keyboard;
 mod encoder;
 mod led_button;
 
+use ble_keyboard::BleKeyboard;
 use encoder::Encoder;
 
 fn main() -> anyhow::Result<()> {
@@ -45,85 +41,11 @@ fn main() -> anyhow::Result<()> {
         ));
     };
 
+    let mut ble_keyboard = BleKeyboard::new();
+
     println!("lets gooooo!");
 
-    let ble_device = BLEDevice::take();
-
-    let server = ble_device.get_server();
-
-    server.on_connect(|_| {
-        ::log::info!("Client connected");
-        ::log::info!("Multi-connect support: start advertising");
-        ble_device.get_advertising().start().unwrap();
-    });
-    let service = server.create_service(uuid128!("fafafafa-fafa-fafa-fafa-fafafafafafa"));
-
-    // A static characteristic.
-    let static_characteristic = service.lock().create_characteristic(
-        uuid128!("d4e0e0d0-1a2b-11e9-ab14-d663bd873d93"),
-        NimbleProperties::READ,
-    );
-    static_characteristic
-        .lock()
-        .set_value("Hello, world!".as_bytes());
-
-    // A writable characteristic.
-    let writable_characteristic = service.lock().create_characteristic(
-        uuid128!("3c9a3f00-8ed3-4bdf-8a39-a01bebede295"),
-        NimbleProperties::READ | NimbleProperties::WRITE,
-    );
-    writable_characteristic
-        .lock()
-        .on_read(move |_, _| {
-            ::log::info!("Read from writable characteristic.");
-        })
-        .on_write(move |value, _param| {
-            ::log::info!("Wrote to writable characteristic: {:?}", value);
-        });
-    let ble_advertising = ble_device.get_advertising();
-    ble_advertising
-        .name("H-Button")
-        .add_service_uuid(uuid128!("fafafafa-fafa-fafa-fafa-fafafafafafa"));
-
-    ble_advertising.start().unwrap();
-
     let peripherals = Peripherals::take().unwrap();
-    // let led = Arc::new(Mutex::new(PinDriver::output(peripherals.pins.gpio2)?));
-    // let switch = Arc::new(Mutex::new(PinDriver::input(peripherals.pins.gpio13)?));
-    // switch.lock().unwrap().set_pull(Pull::Up)?;
-    // switch
-    //     .lock()
-    //     .unwrap()
-    //     .set_interrupt_type(InterruptType::NegEdge)?;
-    // switch.lock().unwrap().enable_interrupt()?;
-    // let timer = EspTimerService::new()
-    //     .unwrap()
-    //     .timer({
-    //         let switch = switch.clone();
-    //         move || {
-    //             ::log::info!("Mute button click detected");
-    //             switch.lock().unwrap().enable_interrupt().unwrap();
-    //         }
-    //     })
-    //     .unwrap();
-
-    // let callback_switch = {
-    //     let switch = switch.clone();
-    //     move || {
-    // switch.lock().unwrap().disable_interrupt().unwrap();
-    // led.lock().unwrap().toggle().unwrap();
-    // timer.after(Duration::from_millis(150)).unwrap();
-    //     }
-    // };
-
-    // unsafe {
-    //     switch.lock().unwrap().subscribe(|| {
-    //         switch.lock().unwrap().disable_interrupt().unwrap();
-    //         led.lock().unwrap().toggle().unwrap();
-    //         timer.after(Duration::from_millis(150)).unwrap();
-    //         notify_interrupt(std::ptr::null_mut());
-    //     })?;
-    // }
 
     let led_button = led_button::LedButton::new(
         peripherals.pins.gpio2,
@@ -131,25 +53,16 @@ fn main() -> anyhow::Result<()> {
         Duration::from_millis(150),
     );
 
-    let pin_a = PinDriver::input(peripherals.pins.gpio25).unwrap();
-    let pin_b = PinDriver::input(peripherals.pins.gpio26).unwrap();
-
-    // A characteristic that notifies every second.
-    let notifying_characteristic = service.lock().create_characteristic(
-        uuid128!("a3c87500-8ed3-4bdf-8a39-a01bebede295"),
-        NimbleProperties::READ | NimbleProperties::NOTIFY,
-    );
-
-    let on_change_callback_encoder = Arc::new({ move |pos: i32| {} });
+    let pin_a = PinDriver::input(peripherals.pins.gpio26).unwrap();
+    let pin_b = PinDriver::input(peripherals.pins.gpio25).unwrap();
 
     let encoder = Encoder::new(
         pin_a,
         pin_b,
-        Duration::from_millis(10),
-        on_change_callback_encoder,
+        Duration::from_millis(5),
+        // on_change_callback_encoder,
     );
 
-    // Queue configurations
     const QUEUE_TYPE_BASE: u8 = 0;
     const ITEM_SIZE: u32 = 0; // we're not posting any actual data, just notifying
     const QUEUE_SIZE: u32 = 10;
@@ -160,69 +73,25 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut last_pos = encoder.position();
-    let mut last_button_state = led_button.is_led_on();
+    let mut last_mute_state = led_button.is_led_on();
 
     loop {
-        FreeRtos::delay_ms(500);
+        FreeRtos::delay_ms(10);
 
-        let characteristic_payload = format!(
-            "Position: {}, Switch: {}",
-            encoder.position(),
-            led_button.is_led_on()
-        );
-        ::log::info!("{}", characteristic_payload);
+        if ble_keyboard.connected() {
+            if last_mute_state != led_button.is_led_on() {
+                ble_keyboard.toggle_mute();
+                last_mute_state = led_button.is_led_on();
+            }
 
-        if (last_pos != encoder.position()) || (last_button_state != led_button.is_led_on()) {
-            ::log::info!("sending notification");
-            notifying_characteristic
-                .lock()
-                .set_value(characteristic_payload.as_bytes())
-                .notify();
+            if last_pos != encoder.position() {
+                if encoder.position() > last_pos {
+                    ble_keyboard.volume_up();
+                } else {
+                    ble_keyboard.volume_down();
+                }
+                last_pos = encoder.position();
+            }
         }
-
-        last_pos = encoder.position();
-        last_button_state = led_button.is_led_on();
-
-        // freertos sleep
-
-        // unsafe {
-        //     const QUEUE_WAIT_TICKS: u32 = 1000;
-
-        //     // Reads the event item out of the queue
-        //     let res = xQueueReceive(EVENT_QUEUE.unwrap(), ptr::null_mut(), QUEUE_WAIT_TICKS);
-
-        //     if res > 0 {
-        //         ::log::info!(
-        //             "received notification pos: {:?}, res: {}",
-        //             encoder.position(),
-        //             res
-        //         );
-        //         notifying_characteristic
-        //             .lock()
-        //             .set_value(
-        //                 format!(
-        //                     "XD" // "pos: {:?}, button: {:?}",
-        //                          // encoder.position(),
-        //                          // led.lock().unwrap().get_level()
-        //                 )
-        //                 .as_bytes(),
-        //             )
-        //             .notify();
-        //     }
-        // }
-
-        // let mut pos = lock.lock().unwrap();
-
-        // while *pos == last_pos {
-        //     pos = cvar.wait(pos).unwrap();
-        // }
-        // ::log::info!("pos: {:?}", encoder.position());
-
-        // notifying_characteristic
-        //     .lock()
-        //     .set_value(format!("pos: {:?}", encoder.position()).as_bytes())
-        //     .notify();
-
-        // last_pos = *pos;
     }
 }
