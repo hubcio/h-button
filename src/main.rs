@@ -1,8 +1,13 @@
-// use std::ffi::c_void;
-// use std::ptr;
-use std::{ffi::c_void, time::Duration};
+use std::{
+    sync::{
+        atomic::{self, AtomicU32},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
 
 use esp_idf_hal::delay::FreeRtos;
+
 #[allow(unused_imports)]
 use esp_idf_sys::{
     self as _, esp, esp_random, gpio_config, gpio_config_t, gpio_install_isr_service,
@@ -10,88 +15,119 @@ use esp_idf_sys::{
     xQueueGenericCreate, xQueueGiveFromISR, xQueueReceive, QueueHandle_t, ESP_INTR_FLAG_IRAM,
 };
 
-// This `static mut` holds the queue handle we are going to get from `xQueueGenericCreate`.
-// This is unsafe, but we are careful not to enable our GPIO interrupt handler until after this value has been initialized, and then never modify it again
-static mut EVENT_QUEUE: Option<QueueHandle_t> = None;
-
-unsafe extern "C" fn notify_interrupt(_: *mut c_void) {
-    xQueueGiveFromISR(EVENT_QUEUE.unwrap(), std::ptr::null_mut());
-}
-
 use esp_idf_hal::gpio::*;
-// use esp_idf_svc::timer::EspTimerService;
 
 use esp_idf_hal::peripherals::Peripherals;
 
-mod ble_keyboard;
+mod ble;
+mod debouncer;
 mod encoder;
-mod led_button;
+mod mute_button;
+mod mute_led;
 
-use ble_keyboard::BleKeyboard;
 use encoder::Encoder;
+use mute_led::LedStatus;
+use serde::{Deserialize, Serialize};
 
+use crate::{ble::*, mute_button::*, mute_led::MuteLed};
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum BluetoothMessage {
+    HidStatus(HidStatus), // from server (esp32) to client (windows, mac os, linux)
+    SetMicMuteIndicator(LedStatus), // from client to server
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct HidStatus {
+    pub encoder_position: i32,
+    pub mic_mute_button_press_count: u32,
+    pub led_status: LedStatus,
+}
 fn main() -> anyhow::Result<()> {
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // WDT OFF
+    ::log::info!("Let's gooooo!");
+
     unsafe {
         esp_idf_sys::esp_task_wdt_delete(esp_idf_sys::xTaskGetIdleTaskHandleForCPU(
             esp_idf_hal::cpu::core() as u32,
         ));
     };
 
-    let mut ble_keyboard = BleKeyboard::new();
-
-    println!("lets gooooo!");
+    let ble = Arc::new(Mutex::new(Ble::new()));
 
     let peripherals = Peripherals::take().unwrap();
-
-    let led_button = led_button::LedButton::new(
-        peripherals.pins.gpio2,
-        peripherals.pins.gpio13,
-        Duration::from_millis(150),
-    );
-
     let pin_a = PinDriver::input(peripherals.pins.gpio26).unwrap();
     let pin_b = PinDriver::input(peripherals.pins.gpio25).unwrap();
+    let encoder = Encoder::new(pin_a, pin_b, Duration::from_millis(2));
+    let press_count = Arc::new(AtomicU32::new(0));
+    let mute_led = Arc::new(MuteLed::new(peripherals.pins.gpio2));
 
-    let encoder = Encoder::new(
-        pin_a,
-        pin_b,
-        Duration::from_millis(5),
-        // on_change_callback_encoder,
+    let mute_button_callback = {
+        let press_count = press_count.clone();
+        let ble = ble.clone();
+        move || {
+            let msg = BluetoothMessage::HidStatus(HidStatus {
+                encoder_position: encoder.position(),
+                mic_mute_button_press_count: press_count.load(atomic::Ordering::SeqCst),
+                led_status: mute_led.get_led_status(),
+            });
+            ble.lock().unwrap().write(msg);
+            press_count.fetch_add(1, atomic::Ordering::SeqCst);
+        }
+    };
+    let _mute_button = MuteButton::new(
+        peripherals.pins.gpio13,
+        Duration::from_millis(50),
+        mute_button_callback,
     );
 
-    const QUEUE_TYPE_BASE: u8 = 0;
-    const ITEM_SIZE: u32 = 0; // we're not posting any actual data, just notifying
-    const QUEUE_SIZE: u32 = 10;
+    let mute_led_clone = mute_led.clone();
+    ble.lock()
+        .unwrap()
+        .set_led_status_characteristic_callback(move |value, _| {
+            let led_status: Result<BluetoothMessage, _> = serde_json::from_slice(value);
+            ::log::info!("Received msg mute LED: {:?}", led_status);
+            match led_status {
+                Ok(BluetoothMessage::SetMicMuteIndicator(status)) => match status {
+                    LedStatus::On => mute_led_clone.set_led_on(),
+                    LedStatus::Off => mute_led_clone.set_led_off(),
+                },
+                Err(e) => {
+                    ::log::info!("Failed to deserialize LED status message: {}", e);
+                }
+                _ => {}
+            }
+        });
 
-    unsafe {
-        // Instantiates the event queue
-        EVENT_QUEUE = Some(xQueueGenericCreate(QUEUE_SIZE, ITEM_SIZE, QUEUE_TYPE_BASE));
-    }
+    let mut last_position = encoder.position();
+    let mut last_press_count = press_count.load(atomic::Ordering::SeqCst);
 
-    let mut last_pos = encoder.position();
-    let mut last_mute_state = led_button.is_led_on();
+    let init_msg = BluetoothMessage::HidStatus(HidStatus {
+        encoder_position: last_position,
+        mic_mute_button_press_count: last_press_count,
+        led_status: mute_led.get_led_status(),
+    });
+    ble.lock().unwrap().write(init_msg);
 
     loop {
-        FreeRtos::delay_ms(10);
+        FreeRtos::delay_ms(100);
 
-        if ble_keyboard.connected() {
-            if last_mute_state != led_button.is_led_on() {
-                ble_keyboard.toggle_mute();
-                last_mute_state = led_button.is_led_on();
-            }
-
-            if last_pos != encoder.position() {
-                if encoder.position() > last_pos {
-                    ble_keyboard.volume_up();
-                } else {
-                    ble_keyboard.volume_down();
-                }
-                last_pos = encoder.position();
-            }
+        if ble.lock().unwrap().connected()
+            && (last_position != encoder.position()
+                || last_press_count != press_count.load(atomic::Ordering::SeqCst))
+        {
+            let msg = BluetoothMessage::HidStatus(HidStatus {
+                encoder_position: encoder.position(),
+                mic_mute_button_press_count: press_count.load(atomic::Ordering::SeqCst),
+                led_status: mute_led.get_led_status(),
+            });
+            ble.lock().unwrap().write(msg);
+            ble.lock().unwrap().notify();
         }
+
+        last_position = encoder.position();
+        last_press_count = press_count.load(atomic::Ordering::SeqCst);
     }
 }
