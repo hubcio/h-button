@@ -5,7 +5,7 @@ use esp_idf_sys::{
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::c_void,
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicU32, Arc, Mutex},
     time::Duration,
 };
 
@@ -24,6 +24,7 @@ pub enum MuteButtonStatus {
 
 pub struct MuteButton<I: InputPin> {
     _button: Arc<Mutex<PinDriver<'static, I, Input>>>,
+    press_count: Arc<AtomicU32>,
 }
 
 impl<I> MuteButton<I>
@@ -33,7 +34,7 @@ where
     pub fn new(
         button_pin: impl Peripheral<P = I> + 'static,
         debounce_duration: Duration,
-        callback: impl Fn() + Send + 'static,
+        callback: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     ) -> Self {
         let mut button = PinDriver::input(button_pin).unwrap();
         button.set_pull(Pull::Up).unwrap();
@@ -41,7 +42,7 @@ where
         button.enable_interrupt().unwrap();
 
         let button = Arc::new(Mutex::new(button));
-
+        let press_count = Arc::new(AtomicU32::new(0));
         const QUEUE_TYPE_BASE: u8 = 0;
         const ITEM_SIZE: u32 = 0;
         const QUEUE_SIZE: u32 = 10;
@@ -54,10 +55,11 @@ where
 
         let callback_button = {
             let debouncer = debouncer;
-
+            let press_count = press_count.clone();
             move || {
                 if debouncer.should_update() {
                     unsafe {
+                        press_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         notify_interrupt(std::ptr::null_mut());
                     }
                 }
@@ -75,7 +77,10 @@ where
                 )
             };
             if result != 0 {
-                (callback)();
+                if let Some(callback) = callback.as_ref() {
+                    let callback = Arc::clone(callback);
+                    callback();
+                }
             }
         });
 
@@ -83,6 +88,13 @@ where
             button.lock().unwrap().subscribe(callback_button).unwrap();
         }
 
-        Self { _button: button }
+        Self {
+            _button: button,
+            press_count,
+        }
+    }
+
+    pub fn press_count(&self) -> u32 {
+        self.press_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 }

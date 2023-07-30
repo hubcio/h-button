@@ -16,21 +16,23 @@ opt-level = "z"
 pio = ["esp-idf-sys/pio"]
 
 [dependencies]
-esp-idf-sys = { version = "0.32.1", features = ["binstart"] }
+esp-idf-sys = { version = "0.33.1", features = ["binstart"] }
 anyhow = { version = "1", features = ["backtrace"] }
 embedded-hal = "0.2.7"
-embedded-svc = "0.24.0"
-esp-idf-hal = "0.40.1"
-esp-idf-svc = "0.45.0"
+embedded-svc = "0.25.3"
+esp-idf-hal = "0.41.2"
+esp-idf-svc = "0.46.0"
 log = "0.4"
 sensible-env-logger = "0.3.1"
-esp32-nimble = "0.0.7"
+esp32-nimble = "0.1.4"
 rotary-encoder-hal = "0.5.0"
 embedded-controls = "0.1.5"
 embedded-time = "0.12.1"
 timestamp-source = "^0.1.3"
 serde = { version = "1.0.152", features = ["derive"] }
 serde_json = "1.0.92"
+smart-leds = "*"
+ws2812-esp32-rmt-driver = "*"
 
 [build-dependencies]
 embuild = "0.31.0"

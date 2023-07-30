@@ -1,10 +1,4 @@
-use std::{
-    sync::{
-        atomic::{self, AtomicU32},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use esp_idf_hal::delay::FreeRtos;
 
@@ -55,79 +49,65 @@ fn main() -> anyhow::Result<()> {
         ));
     };
 
-    let ble = Arc::new(Mutex::new(Ble::new()));
+    let mut ble = Ble::new();
 
     let peripherals = Peripherals::take().unwrap();
-    let pin_a = PinDriver::input(peripherals.pins.gpio26).unwrap();
-    let pin_b = PinDriver::input(peripherals.pins.gpio25).unwrap();
+    let pin_a = PinDriver::input(peripherals.pins.gpio9).unwrap();
+    let pin_b = PinDriver::input(peripherals.pins.gpio10).unwrap();
     let encoder = Encoder::new(pin_a, pin_b, Duration::from_millis(2));
-    let press_count = Arc::new(AtomicU32::new(0));
-    let mute_led = Arc::new(MuteLed::new(peripherals.pins.gpio2));
+    let mute_led = Arc::new(MuteLed::new(21));
 
-    let mute_button_callback = {
-        let press_count = press_count.clone();
-        let ble = ble.clone();
-        move || {
-            let msg = BluetoothMessage::HidStatus(HidStatus {
-                encoder_position: encoder.position(),
-                mic_mute_button_press_count: press_count.load(atomic::Ordering::SeqCst),
-                led_status: mute_led.get_led_status(),
-            });
-            ble.lock().unwrap().write(msg);
-            press_count.fetch_add(1, atomic::Ordering::SeqCst);
-        }
-    };
-    let _mute_button = MuteButton::new(
-        peripherals.pins.gpio13,
-        Duration::from_millis(50),
-        mute_button_callback,
+    let no_callback = None::<Arc<dyn Fn() + Send + Sync + 'static>>;
+    let mute_button = MuteButton::new(
+        peripherals.pins.gpio8,
+        Duration::from_millis(150),
+        no_callback,
     );
-
     let mute_led_clone = mute_led.clone();
-    ble.lock()
-        .unwrap()
-        .set_led_status_characteristic_callback(move |value, _| {
-            let led_status: Result<BluetoothMessage, _> = serde_json::from_slice(value);
-            ::log::info!("Received msg mute LED: {:?}", led_status);
-            match led_status {
-                Ok(BluetoothMessage::SetMicMuteIndicator(status)) => match status {
-                    LedStatus::On => mute_led_clone.set_led_on(),
-                    LedStatus::Off => mute_led_clone.set_led_off(),
-                },
-                Err(e) => {
-                    ::log::info!("Failed to deserialize LED status message: {}", e);
-                }
-                _ => {}
+    ble.set_led_status_characteristic_callback(move |value, _| {
+        let led_status: Result<BluetoothMessage, _> = serde_json::from_slice(value);
+        ::log::info!("Received msg mute LED: {:?}", led_status);
+        match led_status {
+            Ok(BluetoothMessage::SetMicMuteIndicator(status)) => match status {
+                LedStatus::On => mute_led_clone.set_led_on(),
+                LedStatus::Off => mute_led_clone.set_led_off(),
+            },
+            Err(e) => {
+                ::log::info!("Failed to deserialize LED status message: {}", e);
             }
-        });
+            _ => {}
+        }
+    });
 
     let mut last_position = encoder.position();
-    let mut last_press_count = press_count.load(atomic::Ordering::SeqCst);
+    let mut last_press_count = mute_button.press_count();
 
     let init_msg = BluetoothMessage::HidStatus(HidStatus {
         encoder_position: last_position,
         mic_mute_button_press_count: last_press_count,
-        led_status: mute_led.get_led_status(),
+        led_status: Default::default(),
     });
-    ble.lock().unwrap().write(init_msg);
+    ble.write(init_msg);
+
+    ::log::info!("Entering eternal loop");
 
     loop {
         FreeRtos::delay_ms(100);
 
-        if ble.lock().unwrap().connected()
+        if ble.connected()
             && (last_position != encoder.position()
-                || last_press_count != press_count.load(atomic::Ordering::SeqCst))
+                || last_press_count != mute_button.press_count())
         {
             let msg = BluetoothMessage::HidStatus(HidStatus {
                 encoder_position: encoder.position(),
-                mic_mute_button_press_count: press_count.load(atomic::Ordering::SeqCst),
-                led_status: mute_led.get_led_status(),
+                mic_mute_button_press_count: mute_button.press_count(),
+                led_status: Default::default(),
             });
-            ble.lock().unwrap().write(msg);
-            ble.lock().unwrap().notify();
+            ble.write(msg);
+            ble.notify();
         }
 
         last_position = encoder.position();
-        last_press_count = press_count.load(atomic::Ordering::SeqCst);
+        last_press_count = mute_button.press_count();
     }
 }
