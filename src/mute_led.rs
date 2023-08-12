@@ -41,7 +41,7 @@ impl MuteLed {
         self.ws2812.lock().unwrap().write(pixels).unwrap();
 
         let mut led_state = self.led_state.write().unwrap();
-        *led_state = LedStatus::On;
+        *led_state = LedStatus::Off;
     }
 
     pub fn _get_led_status(&self) -> LedStatus {

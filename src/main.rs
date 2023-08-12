@@ -56,6 +56,7 @@ fn main() -> anyhow::Result<()> {
     let pin_b = PinDriver::input(peripherals.pins.gpio10).unwrap();
     let encoder = Encoder::new(pin_a, pin_b, Duration::from_millis(2));
     let mute_led = Arc::new(MuteLed::new(21));
+    mute_led.set_led_off();
 
     let no_callback = None::<Arc<dyn Fn() + Send + Sync + 'static>>;
     let mute_button = MuteButton::new(
